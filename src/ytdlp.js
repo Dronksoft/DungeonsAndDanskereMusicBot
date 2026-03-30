@@ -12,7 +12,7 @@ function isUrl(str) {
 }
 
 /**
- * Searches YouTube (or resolves a URL) using yt-dlp and returns the track info.
+ * Searches YouTube (or resolves a URL) using yt-dlp and returns track info.
  * @param {string} query - Song name or YouTube URL
  * @returns {Promise<object>} yt-dlp JSON info object
  */
@@ -44,12 +44,10 @@ function getInfo(query) {
           new Error(`yt-dlp exited with code ${code}: ${stderr.trim() || 'no output'}`)
         );
       }
-
       const lines = stdout.trim().split('\n').filter(Boolean);
       if (!lines.length) {
         return reject(new Error('No results found'));
       }
-
       try {
         resolve(JSON.parse(lines[0]));
       } catch {
@@ -60,11 +58,13 @@ function getInfo(query) {
 }
 
 /**
- * Creates a PCM audio stream by piping yt-dlp output through ffmpeg.
- * Returns the ffmpeg stdout (raw s16le 48kHz stereo PCM) and the child processes
- * so they can be cleaned up when playback ends.
+ * Creates an Ogg/Opus audio stream by piping yt-dlp → ffmpeg.
  *
- * @param {string} url - Direct YouTube (or other) URL to stream
+ * Using Ogg/Opus lets @discordjs/voice demux the container and send Opus
+ * packets directly to Discord — no JS-side Opus encoder (opusscript /
+ * @discordjs/opus) is needed. ffmpeg handles all transcoding.
+ *
+ * @param {string} url - Direct YouTube (or other) URL
  * @returns {{ stream: Readable, ytdlp: ChildProcess, ffmpeg: ChildProcess }}
  */
 function createAudioStream(url) {
@@ -82,15 +82,17 @@ function createAudioStream(url) {
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
 
+  // Transcode to Ogg/Opus so @discordjs/voice can use StreamType.OggOpus,
+  // which bypasses the need for a JS Opus encoder entirely.
   const ffmpeg = spawn(
     'ffmpeg',
     [
       '-loglevel', 'error',
       '-i', 'pipe:0',
-      '-vn',
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2',
+      '-c:a', 'libopus',
+      '-b:a', '128k',
+      '-vn',          // drop video
+      '-f', 'ogg',
       'pipe:1',
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] }
@@ -98,7 +100,6 @@ function createAudioStream(url) {
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
-  // Log yt-dlp errors but don't crash
   ytdlp.stderr.on('data', (d) => {
     const msg = d.toString().trim();
     if (msg) console.error('[yt-dlp]', msg);
@@ -114,7 +115,7 @@ function createAudioStream(url) {
     }
   });
 
-  // Swallow broken-pipe errors when the player stops early
+  // Swallow broken-pipe errors (normal when the player is stopped mid-song)
   ffmpeg.stdin.on('error', () => {});
   ytdlp.stdout.on('error', () => {});
 

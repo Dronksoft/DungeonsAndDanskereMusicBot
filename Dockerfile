@@ -1,30 +1,24 @@
-FROM node:20-alpine
+# Use Debian-based Node (not Alpine) to avoid musl/glibc compatibility issues
+# with native modules and the yt-dlp binary.
+FROM node:20-slim
 
-# System dependencies: python3 (for yt-dlp), ffmpeg (for audio transcoding),
-# curl (to download yt-dlp), and build tools (for native npm modules like opusscript)
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
+    python3-pip \
     ffmpeg \
-    curl \
-    build-base \
-    # Needed for sodium/crypto native modules
-    libffi-dev
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp from the official GitHub releases (always latest stable)
-RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
+# Install yt-dlp via pip so it runs on the system Python (no glibc/musl mismatch)
+RUN pip3 install --break-system-packages --no-cache-dir yt-dlp
 
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Copy source
 COPY src ./src
 
-# Health check: just verify the process is running
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD pgrep -f "node src/index.js" || exit 1
 

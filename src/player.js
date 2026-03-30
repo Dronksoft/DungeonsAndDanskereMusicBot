@@ -21,7 +21,7 @@ class GuildPlayer {
     this.current = null;
     this.connection = null;
     this.textChannel = null;
-    this._procs = null; // { ytdlp, ffmpeg } of the currently playing track
+    this._procs = null; // { ytdlp, ffmpeg } for the currently playing track
 
     this._player = createAudioPlayer();
 
@@ -32,10 +32,10 @@ class GuildPlayer {
     });
 
     this._player.on('error', (err) => {
-      console.error(`[GuildPlayer ${this.guildId}] Audio player error:`, err.message);
+      console.error(`[GuildPlayer ${this.guildId}] Player error:`, err.message);
       this._killProcs();
       this.current = null;
-      this._send(`There was an error playing the current track, skipping...`);
+      this._send('Error playing current track, skipping...');
       this._playNext();
     });
   }
@@ -50,25 +50,22 @@ class GuildPlayer {
   }
 
   _send(text) {
-    if (this.textChannel) {
-      this.textChannel.send(text).catch(() => {});
-    }
+    if (this.textChannel) this.textChannel.send(text).catch(() => {});
   }
 
   _playNext() {
     if (!this.queue.length) {
-      // Nothing left – disconnect after a short idle timeout
-      this._idleTimeout = setTimeout(() => {
+      // Auto-disconnect after 5 minutes of silence
+      this._idleTimer = setTimeout(() => {
         if (!this.current && this.connection) {
           this.connection.destroy();
           this.connection = null;
         }
-      }, 5 * 60 * 1000); // 5 minutes
+      }, 5 * 60 * 1000);
       return;
     }
 
-    clearTimeout(this._idleTimeout);
-
+    clearTimeout(this._idleTimer);
     const song = this.queue.shift();
     this.current = song;
 
@@ -76,14 +73,18 @@ class GuildPlayer {
       const { stream, ytdlp, ffmpeg } = createAudioStream(song.url);
       this._procs = { ytdlp, ffmpeg };
 
+      // OggOpus: @discordjs/voice demuxes the Ogg container and sends raw
+      // Opus packets to Discord. No JS Opus encoder required.
       const resource = createAudioResource(stream, {
-        inputType: StreamType.Raw, // s16le PCM from our ffmpeg pipeline
+        inputType: StreamType.OggOpus,
         inlineVolume: true,
       });
-
       resource.volume?.setVolume(0.8);
+
       this._player.play(resource);
-      this._send(`Now playing: **${song.title}** (${song.duration}) — requested by ${song.requestedBy}`);
+      this._send(
+        `Now playing: **${song.title}** (${song.duration}) — requested by ${song.requestedBy}`
+      );
     } catch (err) {
       console.error(`[GuildPlayer ${this.guildId}] Failed to start playback:`, err);
       this._send(`Failed to play **${song.title}**: ${err.message}`);
@@ -94,24 +95,20 @@ class GuildPlayer {
   // ─── Public API ────────────────────────────────────────────────────────────
 
   /**
-   * Connects to a voice channel (or reuses an existing connection).
+   * Joins or moves to a voice channel. Safe to call when already connected.
    * @param {import('discord.js').VoiceBasedChannel} voiceChannel
    */
   async connect(voiceChannel) {
-    // Already connected to the right channel
+    // Already connected to the same channel and not destroyed — nothing to do
     if (
       this.connection &&
-      this.connection.joinConfig.channelId === voiceChannel.id &&
-      this.connection.state.status !== VoiceConnectionStatus.Destroyed
+      this.connection.state.status !== VoiceConnectionStatus.Destroyed &&
+      this.connection.joinConfig.channelId === voiceChannel.id
     ) {
       return;
     }
 
-    // Destroy any stale connection first
-    if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      this.connection.destroy();
-    }
-
+    // joinVoiceChannel handles both fresh joins and channel moves
     this.connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: voiceChannel.guild.id,
@@ -119,17 +116,19 @@ class GuildPlayer {
       selfDeaf: true,
     });
 
-    // Handle unexpected disconnects
+    // Recover from brief disconnects (e.g. Discord server hiccup)
     this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
-        // Discord sometimes briefly disconnects – wait for reconnect
         await Promise.race([
           entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
           entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
+        // Reconnected — keep going
       } catch {
-        // Truly disconnected – clean up
-        this.connection.destroy();
+        // Truly disconnected — clean up
+        if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+          this.connection.destroy();
+        }
         this.connection = null;
         this.queue = [];
         this._killProcs();
@@ -137,12 +136,22 @@ class GuildPlayer {
       }
     });
 
-    await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
+    // Wait up to 60 s for the connection to be ready
+    try {
+      await entersState(this.connection, VoiceConnectionStatus.Ready, 60_000);
+    } catch (err) {
+      if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        this.connection.destroy();
+      }
+      this.connection = null;
+      throw new Error(`Could not connect to voice channel: ${err.message}`);
+    }
+
     this.connection.subscribe(this._player);
   }
 
   /**
-   * Adds a song to the queue and starts playback if idle.
+   * Adds a song to the queue and starts playback if the player is idle.
    * @param {{ title: string, url: string, duration: string, requestedBy: string }} song
    */
   enqueue(song) {
@@ -159,7 +168,7 @@ class GuildPlayer {
   }
 
   stop() {
-    clearTimeout(this._idleTimeout);
+    clearTimeout(this._idleTimer);
     this.queue = [];
     this.current = null;
     this._killProcs();
