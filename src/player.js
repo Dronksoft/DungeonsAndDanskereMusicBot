@@ -118,21 +118,32 @@ class GuildPlayer {
   /**
    * Joins or moves to a voice channel. Safe to call when already connected.
    * Uses a local reference throughout to avoid null races with the Disconnected handler.
+   *
+   * IMPORTANT: the Disconnected handler is only registered AFTER entersState(Ready)
+   * resolves. Setting it up earlier causes a race: Discord can briefly send a
+   * Disconnected event during the initial handshake; the handler's 5 s inner
+   * timeout would then fire, destroy the connection, and abort our own wait.
    */
   async connect(voiceChannel) {
-    // Already connected to the same channel — nothing to do
+    // Already connected and ready in the same channel — nothing to do
     if (
       this.connection &&
-      this.connection.state.status !== VoiceConnectionStatus.Destroyed &&
+      this.connection.state.status === VoiceConnectionStatus.Ready &&
       this.connection.joinConfig.channelId === voiceChannel.id
     ) {
       console.log(`[Player ${this.guildId}] Already connected to voice channel`);
       return;
     }
 
+    // Destroy any stale connection before creating a new one
+    if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      console.log(`[Player ${this.guildId}] Destroying stale connection`);
+      this.connection.destroy();
+    }
+    this.connection = null;
+
     console.log(`[Player ${this.guildId}] Joining voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
 
-    // Keep a local ref so async callbacks can't race with this.connection being nulled
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: voiceChannel.guild.id,
@@ -142,7 +153,22 @@ class GuildPlayer {
 
     this.connection = connection;
 
-    // Recover from brief network disconnects
+    // Wait up to 30 s for the initial Ready state.
+    // Do NOT register the Disconnected handler yet — it would race with this wait
+    // if Discord sends a transient Disconnected event during the handshake.
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+      console.log(`[Player ${this.guildId}] Voice connection ready`);
+    } catch (err) {
+      console.error(`[Player ${this.guildId}] Failed to connect to voice:`, err.message);
+      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        connection.destroy();
+      }
+      if (this.connection === connection) this.connection = null;
+      throw new Error(`Could not connect to voice channel: ${err.message}`);
+    }
+
+    // Connection is confirmed Ready — now it's safe to watch for future disconnects
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       console.warn(`[Player ${this.guildId}] Voice disconnected — trying to reconnect`);
       try {
@@ -156,7 +182,6 @@ class GuildPlayer {
         if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
           connection.destroy();
         }
-        // Only null out if this is still the active connection
         if (this.connection === connection) {
           this.connection = null;
           this.queue = [];
@@ -165,24 +190,6 @@ class GuildPlayer {
         }
       }
     });
-
-    connection.on(VoiceConnectionStatus.Ready, () => {
-      console.log(`[Player ${this.guildId}] Voice connection ready`);
-    });
-
-    // Wait up to 60 s for the connection to become ready
-    try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 60_000);
-    } catch (err) {
-      console.error(`[Player ${this.guildId}] Failed to connect to voice:`, err.message);
-      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-        connection.destroy();
-      }
-      if (this.connection === connection) {
-        this.connection = null;
-      }
-      throw new Error(`Could not connect to voice channel: ${err.message}`);
-    }
 
     connection.subscribe(this._player);
     console.log(`[Player ${this.guildId}] Subscribed audio player to connection`);
