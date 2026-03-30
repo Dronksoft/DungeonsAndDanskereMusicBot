@@ -63,6 +63,8 @@ client.on(Events.MessageCreate, async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift().toLowerCase();
 
+  console.log(`[CMD] ${message.author.username}: ${PREFIX}${cmd} ${args.join(' ')}`.trimEnd());
+
   const player = getPlayer(message.guild.id);
   player.textChannel = message.channel;
 
@@ -93,18 +95,18 @@ client.on(Events.MessageCreate, async (message) => {
       };
 
       await player.connect(voiceChannel);
-      player.enqueue(song);
 
-      // If the player was idle, _playNext() already picked it up — show "Now playing"
-      // If there were already songs queued, show "Added to queue"
-      const isPlayingAlready = player.current && player.current !== song;
-      if (isPlayingAlready) {
-        await statusMsg.edit(
-          `Added to queue: **${song.title}** (${song.duration}) — position ${player.queue.length}`
-        );
-      } else {
-        // The "Now playing" message is sent by the player itself; just clean up the search msg
+      // Capture queue length before enqueue so position number is accurate
+      const queuePositionBefore = player.queue.length + (player.current ? 1 : 0);
+      const startedNow = player.enqueue(song);
+
+      if (startedNow) {
+        // _playNext() already sent "Now playing" — just remove the search message
         await statusMsg.delete().catch(() => {});
+      } else {
+        await statusMsg.edit(
+          `Added to queue: **${song.title}** (${song.duration}) — position ${queuePositionBefore + 1}`
+        );
       }
     } catch (err) {
       console.error('[!play]', err);
