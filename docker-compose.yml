@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Optional: persist yt-dlp's cookie/cache so it doesn't re-auth every restart
+    volumes:
+      - ytdlp_cache:/root/.cache/yt-dlp
+    # Give the container enough memory for audio buffering
+    mem_limit: 512m
+
+volumes:
+  ytdlp_cache:
