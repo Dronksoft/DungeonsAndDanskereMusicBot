@@ -2,9 +2,12 @@
 
 require('dotenv').config();
 
+const { execFile } = require('child_process');
 const { Client, GatewayIntentBits, Events, ActivityType } = require('discord.js');
+const { AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const { getInfo, isUrl } = require('./ytdlp');
 const GuildPlayer = require('./player');
+const logger = require('./logger');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -12,7 +15,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || '!';
 
 if (!TOKEN) {
-  console.error('ERROR: DISCORD_TOKEN is not set in environment / .env file');
+  logger.error('ERROR: DISCORD_TOKEN is not set in environment / .env file');
   process.exit(1);
 }
 
@@ -26,6 +29,8 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+
+const START_TIME = Date.now();
 
 // One GuildPlayer per guild
 const players = new Map();
@@ -48,10 +53,28 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${h}h ${m}m ${sec}s`;
+}
+
+/** Runs a command and returns its trimmed stdout, or '?' on failure. */
+function getVersion(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: 5000 }, (err, stdout) => {
+      if (err) return resolve('?');
+      resolve(stdout.trim().split('\n')[0]);
+    });
+  });
+}
+
 // ─── Bot events ────────────────────────────────────────────────────────────
 
 client.once(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  logger.log(`Logged in as ${client.user.tag}`);
   client.user.setActivity(`music | ${PREFIX}play`, { type: ActivityType.Listening });
 });
 
@@ -63,7 +86,7 @@ client.on(Events.MessageCreate, async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift().toLowerCase();
 
-  console.log(`[CMD] ${message.author.username}: ${PREFIX}${cmd} ${args.join(' ')}`.trimEnd());
+  logger.log(`[CMD] ${message.author.username}: ${PREFIX}${cmd} ${args.join(' ')}`.trimEnd());
 
   const player = getPlayer(message.guild.id);
   player.textChannel = message.channel;
@@ -96,12 +119,10 @@ client.on(Events.MessageCreate, async (message) => {
 
       await player.connect(voiceChannel);
 
-      // Capture queue length before enqueue so position number is accurate
       const queuePositionBefore = player.queue.length + (player.current ? 1 : 0);
       const startedNow = player.enqueue(song);
 
       if (startedNow) {
-        // _playNext() already sent "Now playing" — just remove the search message
         await statusMsg.delete().catch(() => {});
       } else {
         await statusMsg.edit(
@@ -109,7 +130,7 @@ client.on(Events.MessageCreate, async (message) => {
         );
       }
     } catch (err) {
-      console.error('[!play]', err);
+      logger.error('[!play]', err);
       const errText = `Failed to find or play \`${query}\`: ${err.message}`;
       if (statusMsg) await statusMsg.edit(errText).catch(() => {});
       else await message.reply(errText).catch(() => {});
@@ -167,6 +188,71 @@ client.on(Events.MessageCreate, async (message) => {
       `Now Playing: **${player.current.title}** (${player.current.duration}) — requested by ${player.current.requestedBy}`
     );
 
+  // ── !debug ─────────────────────────────────────────────────────────────
+  } else if (cmd === 'debug') {
+    const [ytdlpVer, ffmpegVer] = await Promise.all([
+      getVersion('yt-dlp', ['--version']),
+      getVersion('ffmpeg', ['-version']),
+    ]);
+
+    // Voice connection status
+    let voiceStatus = 'Not connected';
+    if (player.connection) {
+      const s = player.connection.state.status;
+      const channelId = player.connection.joinConfig?.channelId;
+      const channel = channelId ? message.guild.channels.cache.get(channelId) : null;
+      const channelName = channel ? `#${channel.name}` : channelId ?? 'unknown';
+      const statusEmoji = {
+        [VoiceConnectionStatus.Ready]: '✅',
+        [VoiceConnectionStatus.Connecting]: '🔄',
+        [VoiceConnectionStatus.Signalling]: '📡',
+        [VoiceConnectionStatus.Disconnected]: '❌',
+        [VoiceConnectionStatus.Destroyed]: '💀',
+      }[s] ?? '❓';
+      voiceStatus = `${statusEmoji} ${s} in ${channelName}`;
+    }
+
+    // Player status
+    const playerStatusEmoji = {
+      [AudioPlayerStatus.Idle]: '⏹',
+      [AudioPlayerStatus.Buffering]: '⏳',
+      [AudioPlayerStatus.Playing]: '▶️',
+      [AudioPlayerStatus.Paused]: '⏸',
+      [AudioPlayerStatus.AutoPaused]: '⏸ (auto)',
+    }[player.status] ?? '❓';
+
+    // Recent log lines — format as a code block, trimmed to fit Discord's 2000 char limit
+    const recentLogs = logger.recent();
+    const logBlock = recentLogs.length
+      ? '```\n' + recentLogs.slice(-15).join('\n') + '\n```'
+      : '*No log entries yet*';
+
+    const lines = [
+      '**Debug Info**',
+      `Uptime: \`${formatUptime(Date.now() - START_TIME)}\``,
+      `Node: \`${process.version}\``,
+      `yt-dlp: \`${ytdlpVer}\``,
+      `ffmpeg: \`${ffmpegVer}\``,
+      '',
+      `Voice: ${voiceStatus}`,
+      `Player: ${playerStatusEmoji} ${player.status}`,
+      player.current
+        ? `Now playing: **${player.current.title}** (${player.current.duration}) — ${player.current.requestedBy}`
+        : 'Now playing: *nothing*',
+      `Queue: ${player.queue.length} song(s)`,
+      '',
+      '**Recent logs (last 15):**',
+      logBlock,
+    ];
+
+    // Discord messages max out at 2000 chars — truncate log block if needed
+    let reply = lines.join('\n');
+    if (reply.length > 1990) {
+      reply = reply.slice(0, 1987) + '…';
+    }
+
+    message.reply(reply);
+
   // ── !help ──────────────────────────────────────────────────────────────
   } else if (cmd === 'help') {
     message.reply(
@@ -179,6 +265,7 @@ client.on(Events.MessageCreate, async (message) => {
         `\`${PREFIX}resume\` — Resume playback (alias: \`${PREFIX}r\`)`,
         `\`${PREFIX}queue\` — Show the current queue (alias: \`${PREFIX}q\`)`,
         `\`${PREFIX}np\` — Show what's currently playing`,
+        `\`${PREFIX}debug\` — Show bot state, versions, and recent logs`,
         `\`${PREFIX}help\` — Show this help message`,
       ].join('\n')
     );

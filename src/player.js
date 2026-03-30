@@ -1,5 +1,6 @@
 'use strict';
 
+const logger = require('./logger');
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -27,14 +28,14 @@ class GuildPlayer {
     this._player = createAudioPlayer();
 
     this._player.on(AudioPlayerStatus.Idle, () => {
-      console.log(`[Player ${this.guildId}] Track finished, moving to next`);
+      logger.log(`[Player ${this.guildId}] Track finished, moving to next`);
       this._killProcs();
       this.current = null;
       this._playNext();
     });
 
     this._player.on('error', (err) => {
-      console.error(`[Player ${this.guildId}] Audio player error:`, err.message);
+      logger.error(`[Player ${this.guildId}] Audio player error:`, err.message);
       this._killProcs();
       this.current = null;
       this._send('There was an error playing the current track, skipping...');
@@ -42,15 +43,15 @@ class GuildPlayer {
     });
 
     this._player.on(AudioPlayerStatus.Playing, () => {
-      console.log(`[Player ${this.guildId}] Status → Playing`);
+      logger.log(`[Player ${this.guildId}] Status → Playing`);
     });
 
     this._player.on(AudioPlayerStatus.Buffering, () => {
-      console.log(`[Player ${this.guildId}] Status → Buffering`);
+      logger.log(`[Player ${this.guildId}] Status → Buffering`);
     });
 
     this._player.on(AudioPlayerStatus.Paused, () => {
-      console.log(`[Player ${this.guildId}] Status → Paused`);
+      logger.log(`[Player ${this.guildId}] Status → Paused`);
     });
   }
 
@@ -58,7 +59,7 @@ class GuildPlayer {
 
   _killProcs() {
     if (!this._procs) return;
-    console.log(`[Player ${this.guildId}] Killing yt-dlp + ffmpeg processes`);
+    logger.log(`[Player ${this.guildId}] Killing yt-dlp + ffmpeg processes`);
     try { this._procs.ytdlp.kill('SIGKILL'); } catch {}
     try { this._procs.ffmpeg.kill('SIGKILL'); } catch {}
     this._procs = null;
@@ -70,10 +71,10 @@ class GuildPlayer {
 
   _playNext() {
     if (!this.queue.length) {
-      console.log(`[Player ${this.guildId}] Queue empty — will disconnect in 5 min if idle`);
+      logger.log(`[Player ${this.guildId}] Queue empty — will disconnect in 5 min if idle`);
       this._idleTimer = setTimeout(() => {
         if (!this.current && this.connection) {
-          console.log(`[Player ${this.guildId}] Idle timeout — disconnecting`);
+          logger.log(`[Player ${this.guildId}] Idle timeout — disconnecting`);
           this.connection.destroy();
           this.connection = null;
         }
@@ -85,7 +86,7 @@ class GuildPlayer {
     const song = this.queue.shift();
     this.current = song;
 
-    console.log(`[Player ${this.guildId}] Starting: "${song.title}" (${song.duration})`);
+    logger.log(`[Player ${this.guildId}] Starting: "${song.title}" (${song.duration})`);
 
     try {
       const { stream, ytdlp, ffmpeg } = createAudioStream(song.url);
@@ -100,13 +101,13 @@ class GuildPlayer {
       resource.volume?.setVolume(0.8);
 
       this._player.play(resource);
-      console.log(`[Player ${this.guildId}] player.play() called`);
+      logger.log(`[Player ${this.guildId}] player.play() called`);
 
       this._send(
         `Now playing: **${song.title}** (${song.duration}) — requested by ${song.requestedBy}`
       );
     } catch (err) {
-      console.error(`[Player ${this.guildId}] Failed to create resource:`, err);
+      logger.error(`[Player ${this.guildId}] Failed to create resource:`, err);
       this._send(`Failed to play **${song.title}**: ${err.message}`);
       this.current = null;
       this._playNext();
@@ -131,18 +132,18 @@ class GuildPlayer {
       this.connection.state.status === VoiceConnectionStatus.Ready &&
       this.connection.joinConfig.channelId === voiceChannel.id
     ) {
-      console.log(`[Player ${this.guildId}] Already connected to voice channel`);
+      logger.log(`[Player ${this.guildId}] Already connected to voice channel`);
       return;
     }
 
     // Destroy any stale connection before creating a new one
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      console.log(`[Player ${this.guildId}] Destroying stale connection`);
+      logger.log(`[Player ${this.guildId}] Destroying stale connection`);
       this.connection.destroy();
     }
     this.connection = null;
 
-    console.log(`[Player ${this.guildId}] Joining voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
+    logger.log(`[Player ${this.guildId}] Joining voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
 
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
@@ -158,9 +159,9 @@ class GuildPlayer {
     // if Discord sends a transient Disconnected event during the handshake.
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-      console.log(`[Player ${this.guildId}] Voice connection ready`);
+      logger.log(`[Player ${this.guildId}] Voice connection ready`);
     } catch (err) {
-      console.error(`[Player ${this.guildId}] Failed to connect to voice:`, err.message);
+      logger.error(`[Player ${this.guildId}] Failed to connect to voice:`, err.message);
       if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
         connection.destroy();
       }
@@ -170,15 +171,15 @@ class GuildPlayer {
 
     // Connection is confirmed Ready — now it's safe to watch for future disconnects
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      console.warn(`[Player ${this.guildId}] Voice disconnected — trying to reconnect`);
+      logger.warn(`[Player ${this.guildId}] Voice disconnected — trying to reconnect`);
       try {
         await Promise.race([
           entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
           entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
-        console.log(`[Player ${this.guildId}] Reconnected`);
+        logger.log(`[Player ${this.guildId}] Reconnected`);
       } catch {
-        console.warn(`[Player ${this.guildId}] Could not reconnect — cleaning up`);
+        logger.warn(`[Player ${this.guildId}] Could not reconnect — cleaning up`);
         if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
           connection.destroy();
         }
@@ -192,7 +193,7 @@ class GuildPlayer {
     });
 
     connection.subscribe(this._player);
-    console.log(`[Player ${this.guildId}] Subscribed audio player to connection`);
+    logger.log(`[Player ${this.guildId}] Subscribed audio player to connection`);
   }
 
   /**
@@ -202,7 +203,7 @@ class GuildPlayer {
    */
   enqueue(song) {
     this.queue.push(song);
-    console.log(`[Player ${this.guildId}] Enqueued: "${song.title}" | Queue length: ${this.queue.length}`);
+    logger.log(`[Player ${this.guildId}] Enqueued: "${song.title}" | Queue length: ${this.queue.length}`);
 
     if (this._player.state.status === AudioPlayerStatus.Idle && !this.current) {
       this._playNext();
@@ -213,13 +214,13 @@ class GuildPlayer {
 
   skip() {
     if (this._player.state.status === AudioPlayerStatus.Idle) return false;
-    console.log(`[Player ${this.guildId}] Skipping: "${this.current?.title}"`);
+    logger.log(`[Player ${this.guildId}] Skipping: "${this.current?.title}"`);
     this._player.stop(true);
     return true;
   }
 
   stop() {
-    console.log(`[Player ${this.guildId}] Stopping`);
+    logger.log(`[Player ${this.guildId}] Stopping`);
     clearTimeout(this._idleTimer);
     this.queue = [];
     this.current = null;

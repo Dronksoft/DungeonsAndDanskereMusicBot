@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawn } = require('child_process');
+const logger = require('./logger');
 
 function isUrl(str) {
   try {
@@ -19,7 +20,7 @@ function isUrl(str) {
 function getInfo(query) {
   return new Promise((resolve, reject) => {
     const target = isUrl(query) ? query : `ytsearch1:${query}`;
-    console.log(`[yt-dlp] Searching: ${target}`);
+    logger.log(`[yt-dlp] Searching: ${target}`);
 
     const proc = spawn('yt-dlp', [
       '--no-playlist',
@@ -41,7 +42,7 @@ function getInfo(query) {
 
     proc.on('close', (code) => {
       if (code !== 0) {
-        console.error(`[yt-dlp] Search failed (exit ${code}): ${stderr.trim()}`);
+        logger.error(`[yt-dlp] Search failed (exit ${code}): ${stderr.trim()}`);
         return reject(
           new Error(`yt-dlp exited with code ${code}: ${stderr.trim() || 'no output'}`)
         );
@@ -52,7 +53,7 @@ function getInfo(query) {
       }
       try {
         const info = JSON.parse(lines[0]);
-        console.log(`[yt-dlp] Found: "${info.title}" (${info.duration}s) — ${info.webpage_url || info.url}`);
+        logger.log(`[yt-dlp] Found: "${info.title}" (${info.duration}s) — ${info.webpage_url || info.url}`);
         resolve(info);
       } catch {
         reject(new Error('Failed to parse yt-dlp JSON output'));
@@ -72,7 +73,7 @@ function getInfo(query) {
  * @returns {{ stream: Readable, ytdlp: ChildProcess, ffmpeg: ChildProcess }}
  */
 function createAudioStream(url) {
-  console.log(`[yt-dlp] Spawning download process for: ${url}`);
+  logger.log(`[yt-dlp] Spawning download process for: ${url}`);
 
   const ytdlp = spawn(
     'yt-dlp',
@@ -88,7 +89,7 @@ function createAudioStream(url) {
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
 
-  console.log(`[ffmpeg] Spawning transcode process (→ Ogg/Opus)`);
+  logger.log(`[ffmpeg] Spawning transcode process (→ Ogg/Opus)`);
 
   const ffmpeg = spawn(
     'ffmpeg',
@@ -106,35 +107,35 @@ function createAudioStream(url) {
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
-  ytdlp.on('spawn', () => console.log('[yt-dlp] Process started'));
-  ffmpeg.on('spawn', () => console.log('[ffmpeg] Process started'));
+  ytdlp.on('spawn', () => logger.log('[yt-dlp] Process started'));
+  ffmpeg.on('spawn', () => logger.log('[ffmpeg] Process started'));
 
   ytdlp.stderr.on('data', (d) => {
     const msg = d.toString().trim();
-    if (msg) console.error('[yt-dlp]', msg);
+    if (msg) logger.error('[yt-dlp]', msg);
   });
   ffmpeg.stderr.on('data', (d) => {
     const msg = d.toString().trim();
-    if (msg) console.error('[ffmpeg]', msg);
+    if (msg) logger.error('[ffmpeg]', msg);
   });
 
   ytdlp.on('close', (code) => {
-    console.log(`[yt-dlp] Process exited (code ${code})`);
+    logger.log(`[yt-dlp] Process exited (code ${code})`);
     if (code !== 0) {
       ffmpeg.stdin.destroy(new Error(`yt-dlp exited with code ${code}`));
     }
   });
 
   ffmpeg.on('close', (code) => {
-    console.log(`[ffmpeg] Process exited (code ${code})`);
+    logger.log(`[ffmpeg] Process exited (code ${code})`);
   });
 
   // Swallow broken-pipe errors (normal when the player is stopped mid-song)
   ffmpeg.stdin.on('error', (err) => {
-    console.warn('[ffmpeg] stdin error (likely stopped early):', err.message);
+    logger.warn('[ffmpeg] stdin error (likely stopped early):', err.message);
   });
   ytdlp.stdout.on('error', (err) => {
-    console.warn('[yt-dlp] stdout error:', err.message);
+    logger.warn('[yt-dlp] stdout error:', err.message);
   });
 
   return { stream: ffmpeg.stdout, ytdlp, ffmpeg };
